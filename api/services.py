@@ -29,6 +29,8 @@ from .web_tools.request import (
 )
 from .web_tools.streaming import stream_web_server_tool_response
 
+_RequestWithMessages = MessagesRequest | TokenCountRequest
+
 TokenCounter = Callable[[list[Any], str | list[Any] | None, list[Any] | None], int]
 
 ProviderGetter = Callable[[str], BaseProvider]
@@ -95,7 +97,9 @@ def _require_non_empty_messages(messages: list[Any]) -> None:
         raise InvalidRequestError("messages cannot be empty")
 
 
-def _extract_system_messages(request_data: MessagesRequest) -> MessagesRequest:
+def _extract_system_messages(
+    request_data: _RequestWithMessages,
+) -> _RequestWithMessages:
     """Move ``role="system"`` messages from the messages array into the ``system`` field.
 
     Claude Code v2.1.156+ (Opus 4.8) sends system prompts as messages with
