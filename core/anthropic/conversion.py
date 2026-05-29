@@ -177,6 +177,24 @@ class AnthropicToOpenAIConverter:
                 getattr(msg, "reasoning_content", None)
             )
 
+            if role == "system":
+                # System-role messages in the array are forwarded as OpenAI system messages.
+                # They should normally be extracted by _extract_system_messages() before
+                # reaching this point, but handle them here as a safety net.
+                if isinstance(content, str):
+                    result.append({"role": "system", "content": content})
+                elif isinstance(content, list):
+                    text_parts = [
+                        get_block_attr(block, "text", "")
+                        for block in content
+                        if get_block_type(block) == "text"
+                    ]
+                    if text_parts:
+                        result.append(
+                            {"role": "system", "content": "\n\n".join(text_parts)}
+                        )
+                continue
+
             if role == "assistant" and isinstance(content, list):
                 if pending is not None and pending.needs_deferred():
                     # Orphan: expected tool result; emit deferred to avoid a stuck session.

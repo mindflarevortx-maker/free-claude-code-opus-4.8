@@ -95,6 +95,74 @@ def _require_non_empty_messages(messages: list[Any]) -> None:
         raise InvalidRequestError("messages cannot be empty")
 
 
+def _extract_system_messages(request_data: MessagesRequest) -> MessagesRequest:
+    """Move ``role="system"`` messages from the messages array into the ``system`` field.
+
+    Claude Code v2.1.156+ (Opus 4.8) sends system prompts as messages with
+    ``role="system"`` inside the ``messages`` array.  The Anthropic Messages API
+    expects system prompts as a separate top-level ``system`` field, so this
+    normalisation step extracts them and merges with any existing ``system`` value.
+    """
+    system_msgs: list[Any] = []
+    other_msgs: list[Any] = []
+
+    for msg in request_data.messages:
+        if msg.role == "system":
+            system_msgs.append(msg)
+        else:
+            other_msgs.append(msg)
+
+    if not system_msgs:
+        return request_data
+
+    # Build merged system string from extracted system messages
+    system_parts: list[str] = []
+    for msg in system_msgs:
+        if isinstance(msg.content, str):
+            system_parts.append(msg.content)
+        elif isinstance(msg.content, list):
+            for block in msg.content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    system_parts.append(block.get("text", ""))
+                elif hasattr(block, "type") and block.type == "text":
+                    system_parts.append(getattr(block, "text", ""))
+
+    new_system_text = "\n\n".join(p for p in system_parts if p)
+
+    # Merge with existing system field
+    existing_system = request_data.system
+    if existing_system is not None:
+        if isinstance(existing_system, str):
+            existing_text = existing_system
+        elif isinstance(existing_system, list):
+            existing_parts: list[str] = []
+            for block in existing_system:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    existing_parts.append(block.get("text", ""))
+                elif hasattr(block, "type") and block.type == "text":
+                    existing_parts.append(getattr(block, "text", ""))
+            existing_text = "\n\n".join(p for p in existing_parts if p)
+        else:
+            existing_text = str(existing_system)
+
+        if existing_text and new_system_text:
+            new_system_text = f"{existing_text}\n\n{new_system_text}"
+        elif existing_text:
+            new_system_text = existing_text
+
+    routed = request_data.model_copy(deep=True)
+    routed.messages = other_msgs
+    routed.system = new_system_text or None
+
+    if not other_msgs:
+        raise InvalidRequestError(
+            "messages array contained only system messages; "
+            "at least one user or assistant message is required"
+        )
+
+    return routed
+
+
 class ClaudeProxyService:
     """Coordinate request optimization, model routing, token count, and providers."""
 
@@ -113,6 +181,7 @@ class ClaudeProxyService:
     def create_message(self, request_data: MessagesRequest) -> object:
         """Create a message response or streaming response."""
         try:
+            request_data = _extract_system_messages(request_data)
             _require_non_empty_messages(request_data.messages)
 
             routed = self._model_router.resolve_messages_request(request_data)
@@ -234,6 +303,7 @@ class ClaudeProxyService:
         request_id = f"req_{uuid.uuid4().hex[:12]}"
         with logger.contextualize(request_id=request_id):
             try:
+                request_data = _extract_system_messages(request_data)
                 _require_non_empty_messages(request_data.messages)
                 routed = self._model_router.resolve_token_count_request(request_data)
                 tokens = self._token_counter(
