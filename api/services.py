@@ -29,8 +29,6 @@ from .web_tools.request import (
 )
 from .web_tools.streaming import stream_web_server_tool_response
 
-_RequestWithMessages = MessagesRequest | TokenCountRequest
-
 TokenCounter = Callable[[list[Any], str | list[Any] | None, list[Any] | None], int]
 
 ProviderGetter = Callable[[str], BaseProvider]
@@ -98,8 +96,8 @@ def _require_non_empty_messages(messages: list[Any]) -> None:
 
 
 def _extract_system_messages(
-    request_data: _RequestWithMessages,
-) -> _RequestWithMessages:
+    request_data: MessagesRequest,
+) -> MessagesRequest:
     """Move ``role="system"`` messages from the messages array into the ``system`` field.
 
     Claude Code v2.1.156+ (Opus 4.8) sends system prompts as messages with
@@ -134,6 +132,72 @@ def _extract_system_messages(
     new_system_text = "\n\n".join(p for p in system_parts if p)
 
     # Merge with existing system field
+    existing_system = request_data.system
+    if existing_system is not None:
+        if isinstance(existing_system, str):
+            existing_text = existing_system
+        elif isinstance(existing_system, list):
+            existing_parts: list[str] = []
+            for block in existing_system:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    existing_parts.append(block.get("text", ""))
+                elif hasattr(block, "type") and block.type == "text":
+                    existing_parts.append(getattr(block, "text", ""))
+            existing_text = "\n\n".join(p for p in existing_parts if p)
+        else:
+            existing_text = str(existing_system)
+
+        if existing_text and new_system_text:
+            new_system_text = f"{existing_text}\n\n{new_system_text}"
+        elif existing_text:
+            new_system_text = existing_text
+
+    routed = request_data.model_copy(deep=True)
+    routed.messages = other_msgs
+    routed.system = new_system_text or None
+
+    if not other_msgs:
+        raise InvalidRequestError(
+            "messages array contained only system messages; "
+            "at least one user or assistant message is required"
+        )
+
+    return routed
+
+
+def _extract_system_messages_token_count(
+    request_data: TokenCountRequest,
+) -> TokenCountRequest:
+    """Token-count variant of :func:`_extract_system_messages`.
+
+    Performs the same system-role extraction logic but is typed for
+    ``TokenCountRequest`` to satisfy the ``ty`` type checker.
+    """
+    system_msgs: list[Any] = []
+    other_msgs: list[Any] = []
+
+    for msg in request_data.messages:
+        if msg.role == "system":
+            system_msgs.append(msg)
+        else:
+            other_msgs.append(msg)
+
+    if not system_msgs:
+        return request_data
+
+    system_parts: list[str] = []
+    for msg in system_msgs:
+        if isinstance(msg.content, str):
+            system_parts.append(msg.content)
+        elif isinstance(msg.content, list):
+            for block in msg.content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    system_parts.append(block.get("text", ""))
+                elif hasattr(block, "type") and block.type == "text":
+                    system_parts.append(getattr(block, "text", ""))
+
+    new_system_text = "\n\n".join(p for p in system_parts if p)
+
     existing_system = request_data.system
     if existing_system is not None:
         if isinstance(existing_system, str):
@@ -307,7 +371,7 @@ class ClaudeProxyService:
         request_id = f"req_{uuid.uuid4().hex[:12]}"
         with logger.contextualize(request_id=request_id):
             try:
-                request_data = _extract_system_messages(request_data)
+                request_data = _extract_system_messages_token_count(request_data)
                 _require_non_empty_messages(request_data.messages)
                 routed = self._model_router.resolve_token_count_request(request_data)
                 tokens = self._token_counter(
